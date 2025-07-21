@@ -11,38 +11,40 @@ from scipy.fft import rfft, rfftfreq
 
 if 'DaqStatus' not in st.session_state:
     st.session_state.DaqStatus = "**DAQ Not Set**"
-if 'AllTorques' not in st.session_state:
-    st.session_state.AllTorques = []
 if 'MVCStatus' not in st.session_state:
     st.session_state.MVCStatus = "**MVC Not Set**"
 if 'flexionMVC' not in st.session_state:
     st.session_state.flexionMVC = []
 if 'extensionMVC' not in st.session_state:
     st.session_state.extensionMVC = []
-if 'MaxTorque' not in st.session_state:
-    st.session_state.MaxTorque = 0
-if 'flexionZeroBaselineStatus' not in st.session_state:
-    st.session_state.flexionZeroBaselineStatus = "**Flexion Zero Baseline Not Set**"
-if 'extensionZeroBaselineStatus' not in st.session_state:
-    st.session_state.extensionZeroBaselineStatus = "**Extension Zero Baseline Not Set**"
-if 'flexionZeroBaseline' not in st.session_state:
-    st.session_state.flexionZeroBaseline = []
-if 'extensionZeroBaseline' not in st.session_state:
-    st.session_state.extensionZeroBaseline = []
-if 'running' not in st.session_state:
-    st.session_state.running = False
+if 'zeroBaselineStatus' not in st.session_state:
+    st.session_state.flexionZeroBaselineStatus = "**Zero Baseline Not Set**"
+if 'zeroBaseline' not in st.session_state:
+    st.session_state.zeroBaseline = []
 if 'trial' not in st.session_state:
     st.session_state.trial = 0
-if 'creatingPath' not in st.session_state:
-    st.session_state.creatingPath = True
 if 'conductingTrial' not in st.session_state:
     st.session_state.conductingTrial = False
 if 'xs' not in st.session_state:
     st.session_state.xs = []
 if 'ys' not in st.session_state:
     st.session_state.ys = []
-if 'CurrentTime' not in st.session_state:
-    st.session_state.CurrentTime = []
+if 'pos' not in st.session_state:
+    st.session_state.pos = []
+if 'voltage' not in st.session_state:
+    st.session_state.voltage = []
+if 'baseline_flex_reg' not in st.session_state:
+    st.session_state.baseline_flex_reg = None
+if 'baselineFLEX' not in st.session_state:
+    st.session_state.baselineFLEX = []
+if 'baseline_flex_freq' not in st.session_state:
+    st.session_state.baseline_flex_freq = None
+if 'baseline_ext_reg' not in st.session_state:
+    st.session_state.baseline_ext_reg = None
+if 'baselineEXT' not in st.session_state:
+    st.session_state.baselineEXT = []
+if 'baseline_ext_freq' not in st.session_state:
+    st.session_state.baseline_ext_freq = None
 
 def startDAQ(daq_input):
     if 'InputTask' in st.session_state and st.session_state.InputTask is not None:
@@ -67,6 +69,8 @@ def startDAQ(daq_input):
     #make this position
     st.session_state.InputTask.ai_channels.add_ai_voltage_chan(f"{daq_input}/ai2", terminal_config=nidaqmx.constants.TerminalConfiguration.DIFF, min_val=-10.0, max_val=10.0)
     #make this torque
+    st.session_state.InputTask.ai_channels.add_ai_voltage_chan(f"{daq_input}/ai4", terminal_config=nidaqmx.constants.TerminalConfiguration.DIFF, min_val=-10.0, max_val=10.0)
+    #make this channel you write voltage to 
     st.session_state.OutputTask = nidaqmx.Task()
     st.session_state.OutputTask.ao_channels.add_ao_voltage_chan(f"{daq_input}/ao0",min_val=-10.0, max_val=10.0)  # Analog output channel
 
@@ -90,21 +94,21 @@ def moving_average(arr,column):
     #padlen=100
     return arr_filt
 
-def start_flexion_baseline(daq_input):
+def set_baseline(daq_input, durationCPM):
     if daq_input == "":
         st.error("Please enter a valid DAQ input.")
         return
 
-    Tstop = 5
-    Ts = .01
-    N = int(Tstop/Ts)
     baselineReadings = []
 
     startDAQ(daq_input)
 
-    for i in range(N):
+    Ts = 0.15483107604086402
+
+    start_time = time.time()
+    while (time.time() - start_time) < durationCPM:
         value = st.session_state.InputTask.read(number_of_samples_per_channel=10)
-        value = [np.mean(value[0]),np.mean(value[1])]
+        value = [time.time() - start_time, np.mean(value[0]),np.mean(value[1])]
         baselineReadings.append(value)
         time.sleep(Ts)
 
@@ -113,9 +117,22 @@ def start_flexion_baseline(daq_input):
 
     baselineReadings = np.array(baselineReadings)
 
-    st.session_state.zeroBaseline = [np.mean(baselineReadings[:,0]),np.mean(baselineReadings[:,1])] 
-    st.session_state.zeroBaseline = [0,0]
-    st.session_state.zeroBaselineStatus = "**Zero Baseline Set**"
+    time_vals = baselineReadings[:, 0]
+    torque_vals = baselineReadings[:, 2]
+
+    dt = np.mean(np.diff(time_vals))
+    N = len(time_vals)
+    yf = rfft(torque_vals)
+    xf = rfftfreq(N, dt)
+    dominant_freq = xf[np.argmax(np.abs(yf[1:])) + 1]  
+
+    X = np.column_stack((
+        np.sin(2 * np.pi * dominant_freq * time_vals),
+        np.cos(2 * np.pi * dominant_freq * time_vals)
+    ))
+    reg = LinearRegression()
+    reg.fit(X, torque_vals)
+    return reg, baselineReadings, dominant_freq
 
 def helperMVC(daq_input, durationCPM=21, window_size=50):
     if daq_input == "":
@@ -137,7 +154,7 @@ def helperMVC(daq_input, durationCPM=21, window_size=50):
     while (time.time() - start_time) < durationCPM:
         value = st.session_state.InputTask.read(number_of_samples_per_channel=20)
         current_time = time.time() - start_time
-        torque = np.mean(value[1])
+        torque = np.mean(value[1]) 
         time_vals.append(current_time)
         torque_vals.append(torque)
 
@@ -188,27 +205,27 @@ def helperMVC(daq_input, durationCPM=21, window_size=50):
     st.session_state.InputTask.close()
     return time_vals, torque_vals
 
-def FindFlexionMVC(daq_input, durationCPM=21, window_size=50):
+def FindFlexionMVC(daq_input, durationCPM=2, window_size=50):
     time_vals, torque_vals = helperMVC(daq_input, durationCPM, window_size)
 
     flexionReadings = np.column_stack((time_vals, torque_vals))
-    mask = flexionReadings[:, 1] >= 0  
+    mask = flexionReadings[:, 1] >= min(np.array(st.session_state.baselineFLEX)[:, 2])
     #swtich with zeroBaseline
     flexionReadings = flexionReadings[mask]
     st.session_state.flexionMVC = flexionReadings
 
-def FindExtensionMVC(daq_input, durationCPM=21, window_size=50):
+def FindExtensionMVC(daq_input, durationCPM=2, window_size=50):
     time_vals, torque_vals = helperMVC(daq_input, durationCPM, window_size)
 
     extensionReadings = np.column_stack((time_vals, torque_vals))
     extensionReadings[:, 1] *= -1
     #take out when doing real trials
-    mask = extensionReadings[:, 1] <= 0  
+    mask = extensionReadings[:, 1] <= max(np.array(st.session_state.baselineEXT)[:, 2])
     #swtich with zeroBaseline
     extensionReadings = extensionReadings[mask]
     st.session_state.extensionMVC = extensionReadings
 
-def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
+def start_task(daq_input, durationCPM=2, num_cycles=1, window_size=10):
 
     trialLength = (durationCPM *2)* num_cycles
 
@@ -217,16 +234,38 @@ def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
     fused_MVC = np.vstack((st.session_state.flexionMVC, extensionMVC_shifted))
 
     repeated_MVC = []
-    for i in range(num_cycles):
+    for i in range(100):
         time_offset = i * fused_MVC[-1, 0]
         segment = fused_MVC.copy()
         segment[:, 0] += time_offset
         repeated_MVC.append(segment)
 
     repeated_MVC = np.vstack(repeated_MVC)
-    print(len(repeated_MVC[1]),'repeated')
-    if len(repeated_MVC[1]) > 100:
-        repeated_MVC[:, 1] = moving_average(repeated_MVC, 1)
+
+    # if len(repeated_MVC[1]) > 100:
+    #     repeated_MVC[:, 1] = moving_average(repeated_MVC, 1)
+
+    time_vals = repeated_MVC[:, 0]
+    torque_vals = repeated_MVC[:, 1]
+
+    dt = np.mean(np.diff(time_vals))
+    N = len(time_vals)
+    yf = rfft(torque_vals)
+    xf = rfftfreq(N, dt)
+    dominant_freq = xf[np.argmax(np.abs(yf[1:])) + 1]  
+
+    X = np.column_stack((
+            np.sin(2 * np.pi * dominant_freq * time_vals),
+            np.cos(2 * np.pi * dominant_freq * time_vals)
+    ))
+    reg = LinearRegression()
+    reg.fit(X, torque_vals)
+
+    X_sin = np.column_stack((
+                np.sin(2 * np.pi * dominant_freq * time_vals),
+                np.cos(2 * np.pi * dominant_freq * time_vals)
+    ))
+    MVC_fit = reg.predict(X_sin)
 
 
     y_top_range = math.ceil(st.session_state.flexionMVC[:,1].max() + (.1 * st.session_state.flexionMVC[:,1].max()))
@@ -244,7 +283,8 @@ def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
 
     st.session_state.xs = []
     st.session_state.ys = []
-    st.session_state.Time = []
+    st.session_state.pos = []
+    st.session_state.voltage = []
 
     plot_placeholder = st.empty()
     startDAQ(daq_input)
@@ -254,15 +294,16 @@ def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
     while st.session_state.conductingTrial:
         st.session_state.OutputTask.write(9)
         value = st.session_state.InputTask.read(number_of_samples_per_channel=20)
-        value = [np.mean(value[0]),np.mean(value[1])]
+        value = [np.mean(value[0]),np.mean(value[1]),np.mean(value[2])]
         elapsed_time = time.time() - start_time
 
         if (elapsed_time) >= trialLength:
             break
 
         st.session_state.xs.append(elapsed_time)
+        st.session_state.pos.append(value[0])
         st.session_state.ys.append(value[1])
-        st.session_state.Time.append(elapsed_time)
+        st.session_state.voltage.append(value[2])
 
         i = len(st.session_state.xs) - 1
         mid_idx = window_size // 2
@@ -288,22 +329,22 @@ def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
         # Windowed data
         xs_window = st.session_state.xs[start_idx:end_idx]
         ys_window = st.session_state.ys[start_idx:end_idx]
-        time_window = st.session_state.Time[start_idx:end_idx]
-
 
         fig, ax = plt.subplots()
         ax.set_ylim(y_range)
         ax.axhline(0, color='k', linestyle='-', linewidth=1)
 
-        MVC_time = repeated_MVC[:, 0]
-        MVC_torque = repeated_MVC[:, 1]
-        ax.plot(MVC_time[start_idx:end_idx+20], MVC_torque[start_idx:end_idx+20], color='red', linestyle=':', linewidth=2, label='Target MVC')
+        # MVC_time = repeated_MVC[:, 0]
+        # MVC_torque = repeated_MVC[:, 1]
+        # ax.plot(MVC_time[start_idx:end_idx+20], MVC_torque[start_idx:end_idx+20], color='red', linestyle='-', linewidth=5, label='Target MVC')
+        mvc_end = end_idx + 20
 
+        ax.plot(time_vals[start_idx:mvc_end], MVC_fit[start_idx:mvc_end], color='red', linestyle='-', label='Baseline Sinusoid Fit', linewidth=2)
 
         if len(xs_window) > 1:
-            ax.plot(time_window, ys_window, color='b', linestyle='-', linewidth=2, label='Measured Path')
+            ax.plot(xs_window, ys_window, color='b', linestyle='-', linewidth=2, label='Measured Path')
         if len(xs_window) > 0:
-            ax.scatter(time_window[-1], ys_window[-1], color='b', s=40, zorder=5, label='Current Point')
+            ax.scatter(xs_window[-1], ys_window[-1], color='b', s=40, zorder=5, label='Current Point')
 
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Torque (Voltage)')
@@ -315,7 +356,7 @@ def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
 
     print('we ended')
     st.session_state.OutputTask.write(0)
-    elapsed = st.session_state.Time[-1]
+    elapsed = st.session_state.xs[-1]
     st.success(f"Task completed successfully! Elapsed time: {elapsed:.2f} seconds")
 
     st.session_state.InputTask.stop()
@@ -324,34 +365,11 @@ def start_task(daq_input, durationCPM=10, num_cycles=1, window_size=50):
     st.session_state.OutputTask.stop()
     st.session_state.OutputTask.close()
 
-    arr = np.column_stack((st.session_state.xs, st.session_state.ys))
+    arr = np.column_stack((st.session_state.xs, st.session_state.pos, st.session_state.ys, st.session_state.voltage))
     np.savetxt(f'Trial{st.session_state.trial}.csv', arr, delimiter=',', fmt='%s')
     st.session_state.arr = arr
 
     st.session_state.trial += 1
-
-def FindMVC():
-    reg = LinearRegression()
-    MVC_Path = np.array(st.session_state.flexionMVC)
-    time = MVC_Path[:,0]
-    # pos = MVC_Path[:,1]
-    tor = MVC_Path[:,1]
-
-    # print(time,'time')
-
-    dt = np.mean(np.diff(time))
-    N = len(time)
-    # print(N,"N")
-    yf = rfft(tor)
-    xf = rfftfreq(N, dt)
-    dominant_freq = xf[np.argmax(np.abs(yf[1:])) + 1]  
-    # dominant_freq = dominant_freq + .006
-    print(dominant_freq,"dom freq")
-
-    X = np.column_stack((np.sin(2 * np.pi * dominant_freq * time), np.cos(2 * np.pi * dominant_freq * time)))
-    reg.fit(X, tor)
-    y_pred = reg.predict(X)
-    return reg, dominant_freq, time, tor, y_pred
 
 def create_components():
     st.title("Real-Time Plotting")
@@ -367,12 +385,20 @@ def create_components():
         st.markdown(st.session_state.DaqStatus, help="Connected DAQ Status")
 
         st.subheader("Set Up")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            durationCPM = st.number_input("**Length Of Cycle**", value=10.0,step=1.0)
-            if st.button("Set Flexion MVC"):
-                FindFlexionMVC(daq_input,durationCPM)
+            durationCPM = st.number_input("**Length Of Flexion**", value=10.0,step=1.0)
+            if st.button("Set Flexion Baseline"):
+                st.session_state.baseline_flex_reg, st.session_state.baselineFLEX, st.session_state.baseline_flex_freq = set_baseline(daq_input, durationCPM)
+
+                print('flex', st.session_state.baselineFLEX)
         with col2:
+            st.markdown("<br>", unsafe_allow_html=True)  
+            if st.button("Set Extension Baseline"):
+                st.session_state.baseline_ext_reg, st.session_state.baselineEXT, st.session_state.baseline_ext_freq = set_baseline(daq_input, durationCPM)
+            if st.button("Set Flexion MVC"):
+                FindFlexionMVC(daq_input, durationCPM)
+        with col3:
             num_cycles = st.number_input("**Number of Cycles**", value=1, step=1)
             if st.button("Set Extension MVC"):
                 FindExtensionMVC(daq_input,durationCPM)
@@ -385,16 +411,58 @@ def create_components():
     with st.expander("Stopping", expanded=True):
         if not isinstance(st.session_state.flexionMVC, list):
 
-            reg, dominant_freq, time, tor, y_pred = FindMVC()
+            extensionMVC_shifted = st.session_state.extensionMVC.copy()
+            extensionMVC_shifted[:, 0] += st.session_state.flexionMVC[-1, 0]
+            fused_MVC = np.vstack((st.session_state.flexionMVC, extensionMVC_shifted))
 
-            y_pred = reg.predict(np.column_stack((np.sin(2 * np.pi * dominant_freq * st.session_state.flexionMVC[:,0]), np.cos(2 * np.pi * dominant_freq * st.session_state.flexionMVC[:,0]))))
+            repeated_MVC = []
+            for i in range(10):
+                time_offset = i * fused_MVC[-1, 0]
+                segment = fused_MVC.copy()
+                segment[:, 0] += time_offset
+                repeated_MVC.append(segment)
 
-            print(len(st.session_state.flexionMVC))
+            repeated_MVC = np.vstack(repeated_MVC)
+
             fig, ax = plt.subplots()
-            ax.plot(st.session_state.flexionMVC[:,0], y_pred, label='Linear Regression Prediction', linestyle='--')
 
-            ax.plot(st.session_state.flexionMVC[:,0], st.session_state.flexionMVC[:,1], label='unsmooth value', linewidth=2)
-            ax.plot(st.session_state.extensionMVC[:,0], st.session_state.extensionMVC[:,1], label='smoothed value', linestyle=':')
+            ax.plot(repeated_MVC[:,0][:100], repeated_MVC[:,1][:100], label='flex mvc', linewidth=2)
+            time_vals = repeated_MVC[:, 0]
+            torque_vals = repeated_MVC[:, 1]
+
+            dt = np.mean(np.diff(time_vals))
+            N = len(time_vals)
+            yf = rfft(torque_vals)
+            xf = rfftfreq(N, dt)
+            dominant_freq = xf[np.argmax(np.abs(yf[1:])) + 1]  
+
+            X = np.column_stack((
+                np.sin(2 * np.pi * dominant_freq * time_vals),
+                np.cos(2 * np.pi * dominant_freq * time_vals)
+            ))
+            reg = LinearRegression()
+            reg.fit(X, torque_vals)
+
+            X_sin = np.column_stack((
+                    np.sin(2 * np.pi * dominant_freq * time_vals),
+                    np.cos(2 * np.pi * dominant_freq * time_vals)
+                ))
+            baseline_fit = reg.predict(X_sin)
+            ax.plot(time_vals[:100], baseline_fit[:100], color='red', linestyle='-', label='Baseline Sinusoid Fit', linewidth=2)
+            # ax.plot(st.session_state.extensionMVC[:,0], st.session_state.extensionMVC[:,1], label='ext mvc', linestyle=':')
+            # if hasattr(st.session_state, "baselineFLEX") and st.session_state.baselineFLEX is not None:
+            #     baseline = st.session_state.baselineFLEX
+            #     ax.plot(baseline[:,0], baseline[:,2], color='orange', label='Baseline Readings')
+            #     # Sinusoidal best fit
+            #     baseline_times = baseline[:,0]
+            #     dominant_freq = st.session_state.baseline_flex_freq  # Store this in session state when you call set_baseline
+            #     X_sin = np.column_stack((
+            #         np.sin(2 * np.pi * dominant_freq * baseline_times),
+            #         np.cos(2 * np.pi * dominant_freq * baseline_times)
+            #     ))
+            #     baseline_fit = st.session_state.baseline_flex_reg.predict(X_sin)
+            #     ax.plot(baseline_times, baseline_fit, color='red', linestyle='-', label='Baseline Sinusoid Fit', linewidth=2)
+
             ax.set_xlabel('Time')
             ax.set_ylabel('Torque')
             ax.legend()
