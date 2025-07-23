@@ -16,7 +16,7 @@ def sin_func(t, A, f, phi, offset):
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Real-Time DAQ Plotting")
+        self.setWindowTitle("Real-Time DAQ Plotting v2 - Real Timestamps")
         self.layout = QtWidgets.QVBoxLayout(self)
 
         # --- Flexion duration input ---
@@ -80,7 +80,7 @@ class MainWindow(QtWidgets.QWidget):
         self.flexion_curve = self.plot_widget.plot(pen=pg.mkPen('g', width=2, style=QtCore.Qt.DotLine))
 
         # Data storage as pandas DataFrames
-        self.df_task = pd.DataFrame(columns=["time", "position", "torque", "voltage"])
+        self.df_task = pd.DataFrame(columns=["time", "position", "torque", "uncorrected_torque", "voltage"])
         self.df_baseline = pd.DataFrame(columns=["time", "torque"])
         self.df_flexionMVC = pd.DataFrame(columns=["time", "torque"])
         self.df_ext_baseline = pd.DataFrame(columns=["time", "torque"])
@@ -92,10 +92,6 @@ class MainWindow(QtWidgets.QWidget):
         self.start_time = None
         self.acquiring = False
         self.trialNum = 1
-        
-        # Add frame counter for consistent timing
-        self.frame_counter = 0
-        self.target_sample_rate = 100  # 100 Hz (10ms intervals)
         
         # Add variables for baseline/MVC data collection
         self.collection_mode = None  # 'flexion_baseline', 'extension_baseline', 'flexion_mvc', 'extension_mvc'
@@ -112,6 +108,18 @@ class MainWindow(QtWidgets.QWidget):
         self.extension_freq = None
         self.extension_reg = None
         self.mvc_fitted = False
+        
+        # Baseline sinusoidal fit parameters
+        self.flexion_baseline_freq = None
+        self.flexion_baseline_reg = None
+        self.extension_baseline_freq = None
+        self.extension_baseline_reg = None
+        self.flexion_baseline_fitted = False
+        self.extension_baseline_fitted = False
+        
+        # Sampling rate tracking for real-time display
+        self.sampling_rates = []
+        self.last_sample_time = None
 
     def startDAQ(self):
         try:
@@ -165,7 +173,6 @@ class MainWindow(QtWidgets.QWidget):
         self.collection_duration = duration
         self.acquiring = True
         self.start_time = None
-        self.frame_counter = 0
         
         # Setup plot
         self.plot_widget.clear()
@@ -176,7 +183,7 @@ class MainWindow(QtWidgets.QWidget):
         
         # Start DAQ and timer
         self.startDAQ()
-        self.timer.start(10)  # Same 10ms interval as task
+        self.timer.start(30)  # Same 10ms interval as task
 
     def set_extension_baseline(self):
         try:
@@ -190,7 +197,6 @@ class MainWindow(QtWidgets.QWidget):
         self.collection_duration = duration
         self.acquiring = True
         self.start_time = None
-        self.frame_counter = 0
         
         # Setup plot
         self.plot_widget.clear()
@@ -201,7 +207,7 @@ class MainWindow(QtWidgets.QWidget):
         
         # Start DAQ and timer
         self.startDAQ()
-        self.timer.start(10)  # Same 10ms interval as task
+        self.timer.start(30)  # Same 10ms interval as task
 
     def set_flexion_mvc(self):
         try:
@@ -215,7 +221,6 @@ class MainWindow(QtWidgets.QWidget):
         self.collection_duration = duration
         self.acquiring = True
         self.start_time = None
-        self.frame_counter = 0
         
         # Setup plot
         self.plot_widget.clear()
@@ -226,7 +231,7 @@ class MainWindow(QtWidgets.QWidget):
         
         # Start DAQ and timer
         self.startDAQ()
-        self.timer.start(10)  # Same 10ms interval as task
+        self.timer.start(30)  # Same 8ms interval as task
 
     def set_extension_mvc(self):
         try:
@@ -240,7 +245,6 @@ class MainWindow(QtWidgets.QWidget):
         self.collection_duration = duration
         self.acquiring = True
         self.start_time = None
-        self.frame_counter = 0
         
         # Setup plot
         self.plot_widget.clear()
@@ -251,14 +255,17 @@ class MainWindow(QtWidgets.QWidget):
         
         # Start DAQ and timer
         self.startDAQ()
-        self.timer.start(10)  # Same 10ms interval as task
+        self.timer.start(30)  # Same 8ms interval as task
 
     def start_task(self):
         self.acquiring = True
-        self.df_task = pd.DataFrame(columns=["time", "position", "torque", "voltage"])
+        self.df_task = pd.DataFrame(columns=["time", "position", "torque", "uncorrected_torque", "voltage"])
         self.start_time = None  # Will be set on first data point
-        self.frame_counter = 0
         self.collection_mode = None  # Reset collection mode for task
+        
+        # Reset sampling rate tracking
+        self.sampling_rates = []
+        self.last_sample_time = None
         
         # Setup plot for task
         self.plot_widget.clear()
@@ -280,7 +287,7 @@ class MainWindow(QtWidgets.QWidget):
             self.num_cycles = 3
         self.task_total_time = self.flexion_duration * 2 * self.num_cycles
         print(f"Starting task for {self.task_total_time} seconds.")
-        self.timer.start(10)  # update every 10 ms
+        self.timer.start(1)  # update every 10 ms
 
     def update_plot(self):
         if not self.acquiring:
@@ -289,13 +296,19 @@ class MainWindow(QtWidgets.QWidget):
         # Set start time on first data point
         if self.start_time is None:
             self.start_time = time.time()
-            self.frame_counter = 0
             
         value = self.input_task.read(number_of_samples_per_channel=10)
         
-        # Use frame counter for consistent timing instead of wall clock time
-        t = self.frame_counter / self.target_sample_rate
-        self.frame_counter += 1
+        # Use real wall-clock time for actual sampling timestamps
+        t = time.time() - self.start_time
+        
+        # Calculate instantaneous sampling rate
+        current_sample_time = time.time()
+        if self.last_sample_time is not None:
+            interval = current_sample_time - self.last_sample_time
+            instantaneous_rate = 1.0 / interval if interval > 0 else 0
+            self.sampling_rates.append(instantaneous_rate)
+        self.last_sample_time = current_sample_time
         
         position = np.mean(value[0])
         torque = np.mean(value[1])
@@ -332,8 +345,14 @@ class MainWindow(QtWidgets.QWidget):
             ao0 = 9  # Example: output value (change as needed)
             self.output_task.write(ao0)
             
-            # --- Append to DataFrame ---
-            new_row = pd.DataFrame([[t, position, torque, voltage]], columns=self.df_task.columns)
+            # Apply baseline correction to torque measurement based on torque sign
+            # Positive torque = flexion (use flexion baseline)
+            # Negative torque = extension (use extension baseline)
+            baseline_correction = self.get_baseline_corrected_value(t, torque_value=torque)
+            corrected_torque = torque - baseline_correction
+            
+            # --- Append to DataFrame with both corrected and uncorrected torque ---
+            new_row = pd.DataFrame([[t, position, corrected_torque, torque, voltage]], columns=self.df_task.columns)
             if self.df_task.empty:
                 self.df_task = new_row
             else:
@@ -382,14 +401,34 @@ class MainWindow(QtWidgets.QWidget):
                         np.sin(2 * np.pi * self.flexion_freq * flexion_phase_times),
                         np.cos(2 * np.pi * self.flexion_freq * flexion_phase_times)
                     ))
-                    y_combined[flexion_mask] = self.flexion_reg.predict(X_flexion)
+                    flexion_mvc_values = self.flexion_reg.predict(X_flexion)
+                    
+                    # Subtract flexion baseline correction from flexion MVC values
+                    if self.flexion_baseline_fitted:
+                        baseline_corrections = np.array([
+                            self.get_baseline_corrected_value(t, is_flexion_phase=True) 
+                            for t in flexion_phase_times
+                        ])
+                        flexion_mvc_values -= baseline_corrections
+                    
+                    y_combined[flexion_mask] = flexion_mvc_values
                 
                 if len(extension_phase_times) > 0:
                     X_extension = np.column_stack((
                         np.sin(2 * np.pi * self.extension_freq * extension_phase_times),
                         np.cos(2 * np.pi * self.extension_freq * extension_phase_times)
                     ))
-                    y_combined[extension_mask] = self.extension_reg.predict(X_extension)
+                    extension_mvc_values = self.extension_reg.predict(X_extension)
+                    
+                    # Subtract extension baseline correction from extension MVC values
+                    if self.extension_baseline_fitted:
+                        baseline_corrections = np.array([
+                            self.get_baseline_corrected_value(t, is_flexion_phase=False) 
+                            for t in extension_phase_times
+                        ])
+                        extension_mvc_values -= baseline_corrections
+                    
+                    y_combined[extension_mask] = extension_mvc_values
                 
                 # Plot the look-ahead combined sinusoid
                 self.flexion_curve.setData(time_points, y_combined)
@@ -434,8 +473,15 @@ class MainWindow(QtWidgets.QWidget):
                 self.output_task.write(0)
                 self.stopDAQ()
                 self.acquiring = False
+                
+                # Display sampling rate analysis
+                self.display_sampling_rate_analysis()
+                
+                # Plot torque correction comparison
+                self.plot_torque_correction_comparison()
+                
                 # --- Save all data to CSV ---
-                self.df_task.to_csv(f"DAQ_Task_Trial{self.trialNum}.csv", index=False)
+                self.df_task.to_csv(f"DAQ_Task_Trial{self.trialNum}_v2.csv", index=False)
                 print("Task complete. Data saved.")
                 self.trialNum += 1
 
@@ -450,26 +496,30 @@ class MainWindow(QtWidgets.QWidget):
             self.df_baseline = pd.DataFrame(self.collection_data, columns=["time", "torque"])
             print("Flexion Baseline set.")
             # Save baseline data to CSV
-            self.df_baseline.to_csv("FlexionBaseline_Data.csv", index=False)
-            print("Flexion baseline data saved to FlexionBaseline_Data.csv")
+            self.df_baseline.to_csv("FlexionBaseline_Data_v2.csv", index=False)
+            print("Flexion baseline data saved to FlexionBaseline_Data_v2.csv")
+            # Calculate baseline sinusoidal fit
+            self.calculate_flexion_baseline_fit()
         elif self.collection_mode == 'extension_baseline':
             self.df_ext_baseline = pd.DataFrame(self.collection_data, columns=["time", "torque"])
             print("Extension Baseline set.")
             # Save extension baseline data to CSV
-            self.df_ext_baseline.to_csv("ExtensionBaseline_Data.csv", index=False)
-            print("Extension baseline data saved to ExtensionBaseline_Data.csv")
+            self.df_ext_baseline.to_csv("ExtensionBaseline_Data_v2.csv", index=False)
+            print("Extension baseline data saved to ExtensionBaseline_Data_v2.csv")
+            # Calculate baseline sinusoidal fit
+            self.calculate_extension_baseline_fit()
         elif self.collection_mode == 'flexion_mvc':
             self.df_flexionMVC = pd.DataFrame(self.collection_data, columns=["time", "torque"])
             print("Flexion MVC set.")
             # Save flexion MVC data to CSV
-            self.df_flexionMVC.to_csv("FlexionMVC_Data.csv", index=False)
-            print("Flexion MVC data saved to FlexionMVC_Data.csv")
+            self.df_flexionMVC.to_csv("FlexionMVC_Data_v2.csv", index=False)
+            print("Flexion MVC data saved to FlexionMVC_Data_v2.csv")
         elif self.collection_mode == 'extension_mvc':
             self.df_extensionMVC = pd.DataFrame(self.collection_data, columns=["time", "torque"])
             print("Extension MVC set.")
             # Save extension MVC data to CSV
-            self.df_extensionMVC.to_csv("ExtensionMVC_Data.csv", index=False)
-            print("Extension MVC data saved to ExtensionMVC_Data.csv")
+            self.df_extensionMVC.to_csv("ExtensionMVC_Data_v2.csv", index=False)
+            print("Extension MVC data saved to ExtensionMVC_Data_v2.csv")
             # Check if both MVCs are now available and calculate sinusoidal fit
             self.calculate_mvc_fit()
             self.plot_combined_mvc_analysis()
@@ -478,6 +528,69 @@ class MainWindow(QtWidgets.QWidget):
         self.collection_mode = None
         self.collection_data = []
         self.plot_widget.setTitle("Real-Time Torque Plot")  # Reset title
+
+    def display_sampling_rate_analysis(self):
+        """Display real-time sampling rate analysis during task"""
+        if len(self.sampling_rates) > 0:
+            sampling_rates_array = np.array(self.sampling_rates)
+            
+            # Calculate statistics
+            mean_rate = np.mean(sampling_rates_array)
+            std_rate = np.std(sampling_rates_array)
+            min_rate = np.min(sampling_rates_array)
+            max_rate = np.max(sampling_rates_array)
+            
+            # Print statistics
+            print(f"\nTask Sampling Rate Analysis:")
+            print(f"Window size: {self.window_size} points")
+            print(f"Display optimization: {'Enabled' if self.window_size > 100 else 'Disabled'}")
+            print(f"Mean sampling rate: {mean_rate:.1f} Hz")
+            print(f"Standard deviation: {std_rate:.2f} Hz")
+            print(f"Min rate: {min_rate:.1f} Hz")
+            print(f"Max rate: {max_rate:.1f} Hz")
+            print(f"Target rate: 50.0 Hz")
+            print(f"Rate stability: {((50.0 - std_rate)/50.0)*100:.1f}%")
+            print(f"Performance impact: {((50.0 - mean_rate)/50.0)*100:.1f}% reduction from target")
+            
+            # Create a time series plot of sampling rates
+            plt.figure(figsize=(12, 8))
+            
+            # Plot 1: Sampling rate over time
+            plt.subplot(2, 1, 1)
+            time_axis = np.arange(len(sampling_rates_array)) * 0.02  # 20ms intervals for 50Hz
+            plt.plot(time_axis, sampling_rates_array, 'b-', linewidth=1, alpha=0.7, label='Instantaneous Rate')
+            plt.axhline(y=mean_rate, color='r', linestyle='--', linewidth=2, label=f'Mean: {mean_rate:.1f} Hz')
+            plt.axhline(y=50, color='g', linestyle='--', linewidth=2, label='Target: 50.0 Hz')
+            plt.fill_between(time_axis, mean_rate - std_rate, mean_rate + std_rate, alpha=0.3, color='red', label=f'±1 SD: {std_rate:.2f} Hz')
+            plt.xlabel('Time (s)')
+            plt.ylabel('Sampling Rate (Hz)')
+            plt.title('Real-Time Sampling Rate During Task')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.ylim(max(0, min_rate - 10), max_rate + 10)
+            
+            # Plot 2: Histogram of sampling rates
+            plt.subplot(2, 1, 2)
+            plt.hist(sampling_rates_array, bins=30, alpha=0.7, color='blue', edgecolor='black')
+            plt.axvline(x=mean_rate, color='r', linestyle='--', linewidth=2, label=f'Mean: {mean_rate:.1f} Hz')
+            plt.axvline(x=50, color='g', linestyle='--', linewidth=2, label='Target: 50.0 Hz')
+            plt.xlabel('Sampling Rate (Hz)')
+            plt.ylabel('Count')
+            plt.title('Distribution of Sampling Rates')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            plt.tight_layout()
+            plt.show()
+            
+            # Save sampling rate data to CSV
+            sampling_data = pd.DataFrame({
+                'sample_number': range(len(sampling_rates_array)),
+                'time_approx': time_axis,
+                'sampling_rate_hz': sampling_rates_array
+            })
+            sampling_data.to_csv(f"SamplingRate_Trial{self.trialNum}_v2.csv", index=False)
+            print(f"Sampling rate data saved to SamplingRate_Trial{self.trialNum}_v2.csv")
 
     def calculate_mvc_fit(self):
         """Calculate and store sinusoidal fit parameters for flexion and extension MVC data separately"""
@@ -528,6 +641,104 @@ class MainWindow(QtWidgets.QWidget):
             print(f"MVC sinusoidal fits calculated:")
             print(f"Flexion - Frequency: {flexion_dominant_freq:.3f} Hz, Period: {1/flexion_dominant_freq:.2f} seconds")
             print(f"Extension - Frequency: {extension_dominant_freq:.3f} Hz, Period: {1/extension_dominant_freq:.2f} seconds")
+            
+            # Calculate and print actual sampling rates
+            print(f"Actual sampling analysis:")
+            print(f"Flexion MVC - Mean interval: {dt_flexion:.4f}s, Effective rate: {1/dt_flexion:.1f} Hz")
+            print(f"Extension MVC - Mean interval: {dt_extension:.4f}s, Effective rate: {1/dt_extension:.1f} Hz")
+            
+            # Calculate interval statistics
+            flexion_intervals = np.diff(flexion_times)
+            extension_intervals = np.diff(extension_times)
+            print(f"Flexion MVC - Interval std: {np.std(flexion_intervals)*1000:.2f}ms")
+            print(f"Extension MVC - Interval std: {np.std(extension_intervals)*1000:.2f}ms")
+
+    def calculate_flexion_baseline_fit(self):
+        """Calculate and store sinusoidal fit parameters for flexion baseline data"""
+        if hasattr(self, "df_baseline") and not self.df_baseline.empty:
+            baseline_times = self.df_baseline["time"].values
+            baseline_torques = self.df_baseline["torque"].values
+            
+            dt_baseline = np.mean(np.diff(baseline_times))
+            N_baseline = len(baseline_times)
+            yf_baseline = rfft(baseline_torques)
+            xf_baseline = rfftfreq(N_baseline, dt_baseline)
+            baseline_dominant_freq = xf_baseline[np.argmax(np.abs(yf_baseline[1:])) + 1]
+            
+            X_baseline = np.column_stack((
+                np.sin(2 * np.pi * baseline_dominant_freq * baseline_times),
+                np.cos(2 * np.pi * baseline_dominant_freq * baseline_times)
+            ))
+            baseline_reg = LinearRegression()
+            baseline_reg.fit(X_baseline, baseline_torques)
+            
+            # Store the fitted parameters
+            self.flexion_baseline_freq = baseline_dominant_freq
+            self.flexion_baseline_reg = baseline_reg
+            self.flexion_baseline_fitted = True
+            
+            print(f"Flexion Baseline sinusoidal fit calculated:")
+            print(f"Frequency: {baseline_dominant_freq:.3f} Hz, Period: {1/baseline_dominant_freq:.2f} seconds")
+            print(f"Coefficients: {baseline_reg.coef_}, Intercept: {baseline_reg.intercept_:.3f}")
+
+    def calculate_extension_baseline_fit(self):
+        """Calculate and store sinusoidal fit parameters for extension baseline data"""
+        if hasattr(self, "df_ext_baseline") and not self.df_ext_baseline.empty:
+            baseline_times = self.df_ext_baseline["time"].values
+            baseline_torques = self.df_ext_baseline["torque"].values
+            
+            dt_baseline = np.mean(np.diff(baseline_times))
+            N_baseline = len(baseline_times)
+            yf_baseline = rfft(baseline_torques)
+            xf_baseline = rfftfreq(N_baseline, dt_baseline)
+            baseline_dominant_freq = xf_baseline[np.argmax(np.abs(yf_baseline[1:])) + 1]
+            
+            X_baseline = np.column_stack((
+                np.sin(2 * np.pi * baseline_dominant_freq * baseline_times),
+                np.cos(2 * np.pi * baseline_dominant_freq * baseline_times)
+            ))
+            baseline_reg = LinearRegression()
+            baseline_reg.fit(X_baseline, baseline_torques)
+            
+            # Store the fitted parameters
+            self.extension_baseline_freq = baseline_dominant_freq
+            self.extension_baseline_reg = baseline_reg
+            self.extension_baseline_fitted = True
+            
+            print(f"Extension Baseline sinusoidal fit calculated:")
+            print(f"Frequency: {baseline_dominant_freq:.3f} Hz, Period: {1/baseline_dominant_freq:.2f} seconds")
+            print(f"Coefficients: {baseline_reg.coef_}, Intercept: {baseline_reg.intercept_:.3f}")
+
+    def get_baseline_corrected_value(self, time_val, torque_value=None, is_flexion_phase=None):
+        """Calculate baseline sinusoidal value for subtraction at given time
+        
+        Args:
+            time_val: Time point for calculation
+            torque_value: If provided, use torque sign to determine baseline (positive=flexion, negative=extension)
+            is_flexion_phase: If torque_value not provided, use this phase indicator
+        """
+        # Determine which baseline to use based on torque sign if available
+        if torque_value is not None:
+            use_flexion_baseline = torque_value >= 0  # Positive torque = flexion, negative = extension
+        elif is_flexion_phase is not None:
+            use_flexion_baseline = is_flexion_phase
+        else:
+            return 0.0  # No way to determine which baseline to use
+        
+        if use_flexion_baseline and self.flexion_baseline_fitted:
+            X_baseline = np.array([[
+                np.sin(2 * np.pi * self.flexion_baseline_freq * time_val),
+                np.cos(2 * np.pi * self.flexion_baseline_freq * time_val)
+            ]])
+            return self.flexion_baseline_reg.predict(X_baseline)[0]
+        elif not use_flexion_baseline and self.extension_baseline_fitted:
+            X_baseline = np.array([[
+                np.sin(2 * np.pi * self.extension_baseline_freq * time_val),
+                np.cos(2 * np.pi * self.extension_baseline_freq * time_val)
+            ]])
+            return self.extension_baseline_reg.predict(X_baseline)[0]
+        else:
+            return 0.0  # No baseline correction available
 
     def plot_combined_mvc_analysis(self):
         """Plot individual MVC data with separate sinusoidal fits and their combination"""
@@ -567,11 +778,15 @@ class MainWindow(QtWidgets.QWidget):
             shifted_extension_fit = extension_fit  # Extension fit doesn't need time shifting, just positioning
             combined_fits = np.concatenate([flexion_fit, shifted_extension_fit])
             
+            # Calculate timing statistics for real timestamps
+            flexion_intervals = np.diff(flexion_times)
+            extension_intervals = np.diff(extension_times)
+            
             # Create the matplotlib plot
-            plt.figure(figsize=(15, 10))
+            plt.figure(figsize=(15, 12))
             
             # Plot 1: Individual MVC data with separate fits
-            plt.subplot(3, 1, 1)
+            plt.subplot(4, 1, 1)
             plt.plot(flexion_times, flexion_torques, 'b-', linewidth=1, alpha=0.7, label='Flexion MVC Data')
             plt.plot(flexion_times, flexion_fit, 'r--', linewidth=2, label=f'Flexion Fit (f={self.flexion_freq:.3f} Hz)')
             plt.plot(shifted_extension_times, extension_torques, 'g-', linewidth=1, alpha=0.7, label='Extension MVC Data')
@@ -579,28 +794,39 @@ class MainWindow(QtWidgets.QWidget):
             plt.axvline(x=time_offset, color='k', linestyle='--', alpha=0.5, label='Flexion/Extension Boundary')
             plt.xlabel('Time (s)')
             plt.ylabel('Torque')
-            plt.title('Individual MVC Data with Separate Sinusoidal Fits')
+            plt.title('Individual MVC Data with Separate Sinusoidal Fits (Real Timestamps)')
             plt.grid(True, alpha=0.3)
             plt.legend()
             
             # Plot 2: Combined raw data
-            plt.subplot(3, 1, 2)
+            plt.subplot(4, 1, 2)
             plt.plot(combined_times, combined_torques, 'b-', linewidth=1, alpha=0.7, label='Combined MVC Data')
             plt.axvline(x=time_offset, color='k', linestyle='--', alpha=0.5, label='Flexion/Extension Boundary')
             plt.xlabel('Time (s)')
             plt.ylabel('Torque')
-            plt.title('Combined Flexion + Extension MVC Data')
+            plt.title('Combined Flexion + Extension MVC Data (Real Timestamps)')
             plt.grid(True, alpha=0.3)
             plt.legend()
             
             # Plot 3: Combined data with combined sinusoidal fits
-            plt.subplot(3, 1, 3)
+            plt.subplot(4, 1, 3)
             plt.plot(combined_times, combined_torques, 'b-', linewidth=1, alpha=0.7, label='Combined MVC Data')
             plt.plot(combined_times, combined_fits, 'r--', linewidth=3, label='Combined Sinusoidal Fits')
             plt.axvline(x=time_offset, color='k', linestyle='--', alpha=0.5, label='Flexion/Extension Boundary')
             plt.xlabel('Time (s)')
             plt.ylabel('Torque')
-            plt.title('Combined MVC Data with Combined Sinusoidal Fits')
+            plt.title('Combined MVC Data with Combined Sinusoidal Fits (Real Timestamps)')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            # Plot 4: Timing intervals histogram
+            plt.subplot(4, 1, 4)
+            plt.hist(flexion_intervals * 1000, bins=20, alpha=0.7, label=f'Flexion Intervals (mean: {np.mean(flexion_intervals)*1000:.1f}ms)', color='blue')
+            plt.hist(extension_intervals * 1000, bins=20, alpha=0.7, label=f'Extension Intervals (mean: {np.mean(extension_intervals)*1000:.1f}ms)', color='green')
+            plt.axvline(x=20, color='red', linestyle='--', label='Target 20ms (50Hz)')
+            plt.xlabel('Sampling Interval (ms)')
+            plt.ylabel('Count')
+            plt.title('Real Sampling Interval Distribution')
             plt.grid(True, alpha=0.3)
             plt.legend()
             
@@ -608,32 +834,98 @@ class MainWindow(QtWidgets.QWidget):
             plt.show()
             
             # Print analysis information
-            print(f"MVC Analysis Results:")
+            print(f"MVC Analysis Results (Real Timestamps):")
             print(f"Flexion - Frequency: {self.flexion_freq:.3f} Hz, Period: {1/self.flexion_freq:.2f} seconds")
             print(f"Flexion - Coefficients: {self.flexion_reg.coef_}, Intercept: {self.flexion_reg.intercept_:.3f}")
             print(f"Extension - Frequency: {self.extension_freq:.3f} Hz, Period: {1/self.extension_freq:.2f} seconds")
             print(f"Extension - Coefficients: {self.extension_reg.coef_}, Intercept: {self.extension_reg.intercept_:.3f}")
+            print(f"Real timing statistics:")
+            print(f"Flexion - Mean interval: {np.mean(flexion_intervals)*1000:.2f}ms, Std: {np.std(flexion_intervals)*1000:.2f}ms")
+            print(f"Extension - Mean interval: {np.mean(extension_intervals)*1000:.2f}ms, Std: {np.std(extension_intervals)*1000:.2f}ms")
+
+    def plot_torque_correction_comparison(self):
+        """Plot comparison between uncorrected and corrected torque data"""
+        if hasattr(self, "df_task") and not self.df_task.empty:
+            times = self.df_task["time"].values
+            corrected_torques = self.df_task["torque"].values
+            uncorrected_torques = self.df_task["uncorrected_torque"].values
+            
+            # Calculate baseline corrections applied
+            baseline_corrections = uncorrected_torques - corrected_torques
+            
+            # Create the matplotlib plot
+            plt.figure(figsize=(15, 10))
+            
+            # Plot 1: Uncorrected vs Corrected Torque
+            plt.subplot(3, 1, 1)
+            plt.plot(times, uncorrected_torques, 'b-', linewidth=1, alpha=0.7, label='Uncorrected Torque')
+            plt.plot(times, corrected_torques, 'r-', linewidth=1, alpha=0.8, label='Corrected Torque')
+            plt.axhline(y=0, color='k', linestyle='--', alpha=0.5, label='Zero Line')
+            plt.xlabel('Time (s)')
+            plt.ylabel('Torque')
+            plt.title('Torque Comparison: Uncorrected vs Baseline-Corrected')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            # Plot 2: Baseline Correction Applied
+            plt.subplot(3, 1, 2)
+            plt.plot(times, baseline_corrections, 'g-', linewidth=1, alpha=0.7, label='Baseline Correction Applied')
+            plt.axhline(y=0, color='k', linestyle='--', alpha=0.5, label='Zero Line')
+            
+            # Color regions based on flexion/extension
+            positive_mask = uncorrected_torques >= 0
+            negative_mask = uncorrected_torques < 0
+            
+            if np.any(positive_mask):
+                plt.fill_between(times, 0, baseline_corrections, where=positive_mask[range(len(times))], 
+                               alpha=0.3, color='blue', label='Flexion Regions (Positive Torque)')
+            if np.any(negative_mask):
+                plt.fill_between(times, 0, baseline_corrections, where=negative_mask[range(len(times))], 
+                               alpha=0.3, color='orange', label='Extension Regions (Negative Torque)')
+            
+            plt.xlabel('Time (s)')
+            plt.ylabel('Baseline Correction (Uncorrected - Corrected)')
+            plt.title('Baseline Correction Applied Over Time')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            # Plot 3: Difference Statistics
+            plt.subplot(3, 1, 3)
+            difference = np.abs(baseline_corrections)
+            plt.hist(difference, bins=30, alpha=0.7, color='purple', edgecolor='black')
+            plt.axvline(x=np.mean(difference), color='r', linestyle='--', linewidth=2, 
+                       label=f'Mean Correction: {np.mean(difference):.3f}')
+            plt.axvline(x=np.std(difference), color='orange', linestyle='--', linewidth=2, 
+                       label=f'Std Correction: {np.std(difference):.3f}')
+            plt.xlabel('Absolute Baseline Correction')
+            plt.ylabel('Count')
+            plt.title('Distribution of Baseline Corrections Applied')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            plt.tight_layout()
+            plt.show()
+            
+            # Print correction statistics
+            print(f"\nBaseline Correction Analysis:")
+            print(f"Mean absolute correction: {np.mean(difference):.4f}")
+            print(f"Standard deviation of corrections: {np.std(difference):.4f}")
+            print(f"Maximum correction applied: {np.max(difference):.4f}")
+            print(f"Percentage of data corrected: {(np.sum(difference > 0.001) / len(difference)) * 100:.1f}%")
+            
+            # Statistics by torque direction
+            flexion_corrections = baseline_corrections[positive_mask]
+            extension_corrections = baseline_corrections[negative_mask]
+            
+            if len(flexion_corrections) > 0:
+                print(f"Flexion corrections - Mean: {np.mean(flexion_corrections):.4f}, Std: {np.std(flexion_corrections):.4f}")
+            if len(extension_corrections) > 0:
+                print(f"Extension corrections - Mean: {np.mean(extension_corrections):.4f}, Std: {np.std(extension_corrections):.4f}")
+        else:
+            print("No task data available for torque correction comparison.")
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
-
-
-        # # Fit sinusoid to baseline
-        # t_vals = self.df_baseline["time"].values
-        # y_vals = self.df_baseline["torque"].values
-        # dt = np.mean(np.diff(t_vals))
-        # N = len(t_vals)
-        # yf = rfft(y_vals)
-        # xf = rfftfreq(N, dt)
-        # dominant_freq = xf[np.argmax(np.abs(yf[1:])) + 1]
-        # X = np.column_stack((
-        #     np.sin(2 * np.pi * dominant_freq * t_vals),
-        #     np.cos(2 * np.pi * dominant_freq * t_vals)
-        # ))
-        # reg = LinearRegression()
-        # reg.fit(X, y_vals)
-        # self.baseline_reg = reg
-        # self.baseline_freq = dominant_freq
