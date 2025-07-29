@@ -15,7 +15,7 @@ from sklearn.metrics import r2_score, mean_squared_error
 import matplotlib.pyplot as plt
 
 # Fixed Y-axis bounds for all plots
-Y_AXIS_BOUND = 0.3
+Y_AXIS_BOUND = 0.8
 
 #Note: click Humac Task first since it takes a few milliseconds to start
 

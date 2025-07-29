@@ -95,8 +95,8 @@ def main():
     print("=" * 80)
     
     # Check if specific files exist (based on your code's output file names)
-    flexion_mvc_file = "FlexionMVC_Data_v3.csv"
-    extension_mvc_file = "ExtensionMVC_Data_v3.csv"
+    flexion_mvc_file = "AndrePreFLEX_MVC.csv"
+    extension_mvc_file = "AndrewPreEXT_MVC.csv"
     
     files_to_analyze = []
     
