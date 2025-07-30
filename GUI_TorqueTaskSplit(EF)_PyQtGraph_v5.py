@@ -117,7 +117,7 @@ class MVCCurveFitter:
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Real-Time DAQ Plotting v4 - Curve Fitting")
+        self.setWindowTitle("Real-Time DAQ Plotting v5 - Curve Fitting")
         self.layout = QtWidgets.QVBoxLayout(self)
 
         # --- Flexion duration input ---
@@ -224,7 +224,7 @@ class MainWindow(QtWidgets.QWidget):
         self.buffer_size = 10
 
         # Simple moving average for smooth plotting
-        self.smoothing_window_size = 20  # Number of points for moving average
+        self.smoothing_window_size = 10  # Number of points for moving average
         self.torque_history = []  # Store recent torque values for smoothing
         self.smoothed_torque = 0.0  # Current smoothed torque value
 
@@ -306,7 +306,7 @@ class MainWindow(QtWidgets.QWidget):
         self.plot_widget.setYRange(-Y_AXIS_BOUND, Y_AXIS_BOUND, padding=0)
         self.plot_widget.disableAutoRange(axis='y')
         
-        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=4), name='Baseline Torque')
+        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=5), name='Baseline Torque')
         self.dot = pg.ScatterPlotItem(size=15, brush=pg.mkBrush('b'))
         self.plot_widget.addItem(self.dot)
         
@@ -335,7 +335,7 @@ class MainWindow(QtWidgets.QWidget):
         self.plot_widget.setYRange(-Y_AXIS_BOUND, Y_AXIS_BOUND, padding=0)
         self.plot_widget.disableAutoRange(axis='y')
         
-        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=4), name='Baseline Torque')
+        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=5), name='Baseline Torque')
         self.dot = pg.ScatterPlotItem(size=15, brush=pg.mkBrush('b'))
         self.plot_widget.addItem(self.dot)
         
@@ -364,7 +364,7 @@ class MainWindow(QtWidgets.QWidget):
         self.plot_widget.setYRange(-Y_AXIS_BOUND, Y_AXIS_BOUND, padding=0)
         self.plot_widget.disableAutoRange(axis='y')
         
-        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=4), name='MVC Torque')
+        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=5), name='MVC Torque')
         self.dot = pg.ScatterPlotItem(size=15, brush=pg.mkBrush('b'))
         self.plot_widget.addItem(self.dot)
         
@@ -393,7 +393,7 @@ class MainWindow(QtWidgets.QWidget):
         self.plot_widget.setYRange(-Y_AXIS_BOUND, Y_AXIS_BOUND, padding=0)
         self.plot_widget.disableAutoRange(axis='y')
         
-        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=4), name='MVC Torque')
+        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=5), name='MVC Torque')
         self.dot = pg.ScatterPlotItem(size=15, brush=pg.mkBrush('b'))
         self.plot_widget.addItem(self.dot)
         
@@ -403,6 +403,71 @@ class MainWindow(QtWidgets.QWidget):
 
     def start_task(self):
         print(f"DEBUG: Starting task, current trial number: {self.trialNum}")
+        print("Waiting for voltage to drop below -0.03...")
+        
+        # Stop any ongoing timers or operations first
+        if hasattr(self, 'timer') and self.timer.isActive():
+            print("Stopping ongoing timer...")
+            self.timer.stop()
+        
+        if hasattr(self, 'voltage_check_timer') and self.voltage_check_timer.isActive():
+            print("Stopping voltage check timer...")
+            self.voltage_check_timer.stop()
+        
+        # Reset acquisition state and collection mode to prevent conflicts
+        self.acquiring = False
+        self.collection_mode = None
+        
+        # Update plot title to show waiting status
+        self.plot_widget.setTitle("Waiting for voltage trigger... (< -0.03V)")
+
+        self.stopDAQ()  # Stop any existing DAQ tasks
+        
+        # Start DAQ for voltage monitoring
+        self.startDAQ()
+        
+        # Set up timer to continuously check voltage
+        self.voltage_check_timer = QtCore.QTimer()
+        self.voltage_check_timer.timeout.connect(self._check_voltage_trigger)
+        self.voltage_check_timer.start(10)  # Check every 10ms
+    
+    def _check_voltage_trigger(self):
+        """Check if voltage has dropped below -0.03 to trigger task start"""
+        try:
+            # Check if DAQ tasks are still valid before reading
+            if not hasattr(self, 'input_task') or self.input_task is None:
+                print("Input task not available, restarting DAQ...")
+                self.startDAQ()
+                return
+                
+            value = self.input_task.read(number_of_samples_per_channel=20)
+            current_voltage = np.mean(value[0])  # ai0 - velocity/voltage
+            print(f"Current voltage: {current_voltage:.4f}")
+            
+            if current_voltage < -0.03:
+                print("Voltage trigger detected! Starting task...")
+                # Stop the voltage checking timer
+                self.voltage_check_timer.stop()
+                # Start the actual task
+                self._start_task_delayed()
+        except Exception as e:
+            print(f"Error reading voltage: {e}")
+            # Try to restart DAQ on error
+            try:
+                print("Attempting to restart DAQ...")
+                self.stopDAQ()
+                self.startDAQ()
+            except Exception as restart_error:
+                print(f"Failed to restart DAQ: {restart_error}")
+                # Stop voltage checking if we can't recover
+                if hasattr(self, 'voltage_check_timer'):
+                    self.voltage_check_timer.stop()
+                print("Voltage checking stopped due to DAQ error. Please try again.")
+ 
+    def _start_task_delayed(self):
+        """Actually start the task after the delay"""
+        print("Starting task now!")
+        
         self.acquiring = True
         self.df_task = pd.DataFrame(columns=["time", "position", "torque", "uncorrected_torque", "voltage", "velocity"])
         self.start_time = None
@@ -439,9 +504,9 @@ class MainWindow(QtWidgets.QWidget):
         self.plot_widget.hideButtons()
         
         # Add MVC curve first (bottom layer)
-        self.mvc_curve = self.plot_widget.plot(pen=pg.mkPen('r', width=7, style=QtCore.Qt.DotLine), name='Combined MVC')
+        self.mvc_curve = self.plot_widget.plot(pen=pg.mkPen('r', width=15, style=QtCore.Qt.DotLine), name='Combined MVC')
         # Add blue curve last (top layer) so it appears over MVC line
-        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=4), name='Measured Torque')
+        self.curve = self.plot_widget.plot(pen=pg.mkPen('b', width=5), name='Measured Torque')
         self.dot = pg.ScatterPlotItem(size=15, brush=pg.mkBrush('b'))
         self.plot_widget.addItem(self.dot)
         
@@ -718,8 +783,8 @@ class MainWindow(QtWidgets.QWidget):
             self.df_baseline = pd.DataFrame(self.collection_data, columns=["time", "torque", "velocity"])
             print("Flexion Baseline set.")
             # Save baseline data to CSV
-            self.df_baseline.to_csv("FlexionBaseline_Data_v4.csv", index=False)
-            print("Flexion baseline data saved to FlexionBaseline_Data_v4.csv")
+            self.df_baseline.to_csv("FlexionBaseline_Data_v5.csv", index=False)
+            print("Flexion baseline data saved to FlexionBaseline_Data_v5.csv")
             # Calculate baseline curve fit
             self.calculate_flexion_baseline_fit()
             # Plot baseline analysis
@@ -728,8 +793,8 @@ class MainWindow(QtWidgets.QWidget):
             self.df_ext_baseline = pd.DataFrame(self.collection_data, columns=["time", "torque", "velocity"])
             print("Extension Baseline set.")
             # Save extension baseline data to CSV
-            self.df_ext_baseline.to_csv("ExtensionBaseline_Data_v4.csv", index=False)
-            print("Extension baseline data saved to ExtensionBaseline_Data_v4.csv")
+            self.df_ext_baseline.to_csv("ExtensionBaseline_Data_v5.csv", index=False)
+            print("Extension baseline data saved to ExtensionBaseline_Data_v5.csv")
             # Calculate baseline curve fit
             self.calculate_extension_baseline_fit()
             # Plot baseline analysis
@@ -738,8 +803,8 @@ class MainWindow(QtWidgets.QWidget):
             self.df_flexionMVC = pd.DataFrame(self.collection_data, columns=["time", "torque", "velocity"])
             print("Flexion MVC set.")
             # Save flexion MVC data to CSV
-            self.df_flexionMVC.to_csv("FlexionMVC_Data_v4.csv", index=False)
-            print("Flexion MVC data saved to FlexionMVC_Data_v4.csv")
+            self.df_flexionMVC.to_csv("FlexionMVC_Data_v5.csv", index=False)
+            print("Flexion MVC data saved to FlexionMVC_Data_v5.csv")
             # Check if both MVCs are available and calculate curve fit
             if hasattr(self, "df_extensionMVC") and not self.df_extensionMVC.empty:
                 self.calculate_mvc_fit()
@@ -747,8 +812,8 @@ class MainWindow(QtWidgets.QWidget):
             self.df_extensionMVC = pd.DataFrame(self.collection_data, columns=["time", "torque", "velocity"])
             print("Extension MVC set.")
             # Save extension MVC data to CSV
-            self.df_extensionMVC.to_csv("ExtensionMVC_Data_v4.csv", index=False)
-            print("Extension MVC data saved to ExtensionMVC_Data_v4.csv")
+            self.df_extensionMVC.to_csv("ExtensionMVC_Data_5.csv", index=False)
+            print("Extension MVC data saved to ExtensionMVC_Data_v5.csv")
             # Check if both MVCs are available and calculate curve fit
             if hasattr(self, "df_flexionMVC") and not self.df_flexionMVC.empty:
                 self.calculate_mvc_fit()
@@ -770,8 +835,8 @@ class MainWindow(QtWidgets.QWidget):
         
         # Save task data
         print(f"DEBUG: Current trial number before saving: {self.trialNum}")
-        self.df_task.to_csv(f"DAQ_Task_Trial{self.trialNum}_v4.csv", index=False)
-        print(f"Task data saved to DAQ_Task_Trial{self.trialNum}_v4.csv")
+        self.df_task.to_csv(f"DAQ_Task_Trial{self.trialNum}_v5.csv", index=False)
+        print(f"Task data saved to DAQ_Task_Trial{self.trialNum}_v5.csv")
         self.trialNum += 1
 
         # Display sampling rate analysis
@@ -805,8 +870,8 @@ class MainWindow(QtWidgets.QWidget):
             'time_approx': time_axis,
             'sampling_rate_hz': sampling_rates_array
         })
-        sampling_data.to_csv(f"SamplingRate_Trial{self.trialNum}_v4.csv", index=False)
-        print(f"Sampling rate data saved to SamplingRate_Trial{self.trialNum}_v4.csv")
+        sampling_data.to_csv(f"SamplingRate_Trial{self.trialNum}_v5.csv", index=False)
+        print(f"Sampling rate data saved to SamplingRate_Trial{self.trialNum}_v5.csv")
 
     def filter_by_velocity(self, df, velocity_threshold=0.03, data_type="", phase_type=""):
         """Filter DataFrame based on phase-specific velocity criteria"""
